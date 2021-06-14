@@ -206,7 +206,7 @@
 
 而使用第二种方案就可以完全解决以上问题。包装函数伪代码如下：
 
-```cpp
+```cpp {.line-numbers}
 void wrap_co_entry(user_co_entry, args ...) {
     try {
         result = user_co_entry(args ...);
@@ -266,7 +266,7 @@ void wrap_co_entry(user_co_entry, args ...) {
 
 所以，我们需要第三个协程来辅助保存、恢复协程的共享栈。伪代码如下：
 
-```cpp
+```cpp {.line-numbers}
 void switch_stack_and_registers(current_context, new_context) {
     switch_co(current_context, switch_stack_context);
 }
@@ -299,7 +299,7 @@ void switch_stack_entry() {
 
 伪代码如下：
 
-```cpp
+```cpp {.line-numbers}
 void switch_between_shared_and_not_shared(current_context, new_context) {
     if(is_shared_stack(current_context)) {
         save_stack(current_context);
@@ -394,7 +394,7 @@ void switch_between_shared_and_not_shared(current_context, new_context) {
   - 协程入口地址，主协程的入口地址为线程入口地址，且后续不会再使用，不需要设置。
 #### 创建协程的执行线程
   此时就是创建一个线程，用来执行协程，那么这个线程里面需要做哪些操作呢？作为协程的运行环境，主要的任务就是从等待运行的的协程队列中挑选一个协程去运行。伪代码描述如下：
-  ```cpp
+  ```cpp {.line-numbers}
   void co_env_thread_entry(){
       while(!should_exit()) {
           next_co_obj = choose_one_obj_from_ready_queue();
@@ -491,9 +491,96 @@ void switch_between_shared_and_not_shared(current_context, new_context) {
 
 协程开始调度执行，就是使用`switch_co`从主协程切换到刚创建的协程时候，那么，`switch_co`的逻辑是什么呢？
 
-#### 保存当前执行环境
+#### switch_co 接受的参数
 
+`switch_co`函数应该接受什么参数呢？需要完整的协程对象吗？从上述分析来看是不需要的，`switch_co`的目的就是将当前运行环境的寄存器信息保存下来，然后将下一个要运行线程的寄存器信息恢复，所以他只需要两个协程的寄存器信息就好了。
 
+因此`switch_co`可以这样设计：
+
+```cpp {.line-numbers}
+void switch_co(void *current_registers, void *next_registers);
+```
+
+然后将当前的寄存器信息保存到`current_registers`，将`next_registers`中的寄存器信息恢复到当前运行环境。
+
+这一部分代码需要使用内嵌汇编实现。
+#### 编译器帮你生成的汇编指令
+
+##### 不涉及rsp变化的函数
+
+我们先看一下一个空函数会生成哪些汇编指令：
+
+```cpp {.line-numbers}
+void switch_co(void *, void *) {
+
+}
+```
+
+将会生成汇编代码：
+
+```asm {.line-numbers}
+switch_co(void*, void*):
+        pushq   %rbp
+        movq    %rsp, %rbp
+        movq    %rdi, -8(%rbp)
+        movq    %rsi, -16(%rbp)
+        nop
+        popq    %rbp
+        ret
+```
+
+先看一下有效代码执行之前发生了什么。
+
+第2行：将之前的栈基地址`rbp`入栈保存下来
+第3行：将之前的`rsp`设置为新的栈基地址`rbp`
+第4行、第5行：将两个参数放到栈中，注意：这里没有开辟栈空间，所以实际上这两个变量是在栈顶之外的。
+
+再看一下程序返回的时候发生了什么。
+第7行：从栈中弹出之前存储的`rbp`值，恢复`rbp`。
+第8行：返回。这里的操作相当于
+
+```asm {.line-numbers}
+popq %rip
+```
+
+只不过我们在实际写汇编语言的时候无法直接操作`rip`寄存器，所以通过`ret`指令跳转。
+
+##### 涉及rsp变化的函数
+
+这里我们只写了一个空函数，不涉及`rsp`的变化，当涉及栈指针修改的时候，会生成更多的汇编指令。
+
+```cpp {.line-numbers}
+#include <stdio.h>
+
+void switch_co(void *, void *){
+    getchar();
+}
+```
+
+生成的汇编指令：
+
+```asm {.line-numbers}
+switch_co(void*, void*):
+        pushq   %rbp
+        movq    %rsp, %rbp
+        subq    $16, %rsp
+        movq    %rdi, -8(%rbp)
+        movq    %rsi, -16(%rbp)
+        call    getchar
+        nop
+        leave
+        ret
+```
+
+注意到第4行有修改`rsp`。那么函数结尾的时候，仅恢复`rbp`就不行了，还需要恢复`rsp`。
+
+第9行的`leave`语句就是为了恢复`rsp`的，其作用类似于：
+
+```asm {.line-numbers}
+movq %rbp, %rsp
+```
+
+这样在函数调用完毕后，就可以完全恢复调用前的栈栈状态了。
 
 ## 协程同步
 
