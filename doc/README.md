@@ -823,6 +823,10 @@ void func() {
 
 ![coroutine_co_task](imgs/coroutine_co_task.png)
 
+  如上图，图中描述的是一种继承关系，当然也可以是组合关系，或许还会更好一些。
+
+![coroutine_co_task2](imgs/coroutine_co_task2.png)
+
 #### 协程分离
 
 #### 协程对象销毁
